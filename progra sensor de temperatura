@@ -1,0 +1,105 @@
+#include <Arduino.h>
+#include <stdint.h>
+#include <driver/ledc.h>
+
+// Pines para LEDs separados
+#define LED_ROJO     19
+#define LED_AMARILLO 17
+#define LED_VERDE    18
+
+// Pin del LM35
+#define LM35_PIN 34   // Entrada analógica (ADC)
+
+// Botón para tomar lectura
+#define BTN_PIN 14
+
+// Configuración PWM para LEDs
+#define FREQ 5000
+#define RESOLUTION 8 // 0-255 duty
+
+// Configuración PWM para servo
+#define SERVO_PIN 15
+#define SERVO_CH  4        // Canal exclusivo para el servo
+#define SERVO_FREQ 50      // 50Hz para servomotor
+#define SERVO_RES 16       // Resolución alta (0-65535)
+
+// Variables
+float temperatura = 0;
+
+// Función para mover el servo (0° a 180°)
+void moverServo(int angulo) {
+  int minDuty = 1638;   // ~5% duty (1 ms)
+  int maxDuty = 8192;   // ~10% duty (2 ms)
+  int duty = map(angulo, 0, 180, minDuty, maxDuty);
+  ledcWrite(SERVO_CH, duty);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Configuración de PWM para LEDs
+  ledcSetup(3, FREQ, RESOLUTION); // Canal 3 → Rojo
+  ledcSetup(1, FREQ, RESOLUTION); // Canal 1 → Amarillo
+  ledcSetup(2, FREQ, RESOLUTION); // Canal 2 → Verde
+
+  ledcAttachPin(LED_ROJO, 3);
+  ledcAttachPin(LED_AMARILLO, 1);
+  ledcAttachPin(LED_VERDE, 2);
+
+  pinMode(BTN_PIN, INPUT_PULLUP);
+
+  // Configuración de PWM para servo
+  ledcSetup(SERVO_CH, SERVO_FREQ, SERVO_RES);
+  ledcAttachPin(SERVO_PIN, SERVO_CH);
+
+  // Inicializar servo en 0°
+  moverServo(0);
+
+  // Apagar LEDs al inicio
+  ledcWrite(3, 0);
+  ledcWrite(1, 0);
+  ledcWrite(2, 0);
+}
+
+void loop() {
+  // Esperar a que se presione el botón
+  if (digitalRead(BTN_PIN) == LOW) {
+    delay(50); // Anti-rebote
+    if (digitalRead(BTN_PIN) == LOW) {
+      // Leer temperatura
+      int valorADC = analogRead(LM35_PIN);
+      float voltaje = (valorADC * 3.3) / 4095.0;
+      temperatura = voltaje / 0.01; // LM35: 10mV = 0.01V = 1°C
+
+      Serial.print("Temperatura medida: ");
+      Serial.print(temperatura);
+      Serial.println(" °C");
+
+      // Actualizar semáforo y servo
+      if (temperatura < 17.0) {
+        // Verde
+        ledcWrite(3, 0);   // Rojo apagado
+        ledcWrite(1, 0);   // Amarillo apagado
+        ledcWrite(2, 255); // Verde encendido
+        moverServo(140);
+      }
+      else if (temperatura >= 18.0 && temperatura < 20.0) {
+        // Amarillo
+        ledcWrite(3, 0);
+        ledcWrite(1, 255);
+        ledcWrite(2, 0);
+        moverServo(90);
+      }
+      else if (temperatura >= 20.0) {
+        // Rojo
+        ledcWrite(3, 255);
+        ledcWrite(1, 0);
+        ledcWrite(2, 0);
+        moverServo(45);
+      }
+
+      // Esperar a que se suelte el botón antes de permitir otra lectura
+      while (digitalRead(BTN_PIN) == LOW);
+    }
+  }
+}
