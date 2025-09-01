@@ -1,0 +1,202 @@
+
+#include <Arduino.h>
+#include <stdint.h>
+#include <driver/ledc.h>
+#include <WiFi.h>
+#include "AdafruitIO_WiFi.h"
+
+// ----------------------
+// Credenciales de Adafruit IO
+// ----------------------
+#define IO_USERNAME  "Ivown_h"
+#define IO_KEY      
+
+// WiFi
+#define WIFI_SSID    "Nosoyese"
+#define WIFI_PASS    "soyese123"
+
+// Cliente Adafruit IO
+AdafruitIO_WiFi io(IO_USERNAME, IO_KEY, WIFI_SSID, WIFI_PASS);
+
+// Feed de temperatura
+AdafruitIO_Feed *temperatura_feed = io.feed("temperatura");
+
+// ----------------------
+// Pines y Configuración
+// ----------------------
+#define LED_ROJO     19
+#define LED_AMARILLO 17
+#define LED_VERDE    18
+#define LM35_PIN     34
+#define BTN_PIN      14
+#define SERVO_PIN    15
+#define SERVO_CH     4
+#define SERVO_FREQ   50
+#define SERVO_RES    16
+
+#define FREQ         5000
+#define RESOLUTION   8
+
+// Display
+int pinesDisp[]   = {13, 12, 27, 26, 25, 33, 32, 2};
+int pinesTranst[] = {22, 21, 23};
+
+byte numeros[10][8] = {
+  {0,0,0,0,0,0,1,1}, // 0
+  {1,0,0,1,1,1,1,1}, // 1
+  {0,0,1,0,0,1,0,1}, // 2
+  {0,0,0,0,1,1,0,1}, // 3
+  {1,0,0,1,1,0,0,1}, // 4
+  {0,1,0,0,1,0,0,1}, // 5
+  {0,1,0,0,0,0,0,1}, // 6
+  {0,0,0,1,1,1,1,1}, // 7
+  {0,0,0,0,0,0,0,1}, // 8
+  {0,0,0,0,1,0,0,1}  // 9
+};
+
+volatile int DispSelec = 1;
+hw_timer_t *Timer0_Cfg = NULL;
+
+float temperatura = 0;
+
+// ----------------------
+// Timer para multiplexado
+// ----------------------
+void IRAM_ATTR TMR0_ISR() {
+  DispSelec += 1;
+  if (DispSelec > 3) {
+    DispSelec = 1;
+  }
+  digitalWrite(pinesTranst[0], LOW);
+  digitalWrite(pinesTranst[1], LOW);
+  digitalWrite(pinesTranst[2], LOW);
+  delayMicroseconds(100);
+}
+
+void initTMR0(void) {
+  Timer0_Cfg = timerBegin(0, 80, true); 
+  timerAttachInterrupt(Timer0_Cfg, &TMR0_ISR, true); 
+  timerAlarmWrite(Timer0_Cfg, 2000, true);
+  timerAlarmEnable(Timer0_Cfg);
+}
+
+// ----------------------
+// Servo
+// ----------------------
+void moverServo(int angulo) {
+  int minDuty = 1638;
+  int maxDuty = 8192;
+  int duty = map(angulo, 0, 180, minDuty, maxDuty);
+  ledcWrite(SERVO_CH, duty);
+}
+
+// ----------------------
+// SETUP
+// ----------------------
+void setup() {
+  Serial.begin(115200);
+
+  // Configuración Display
+  for (int i = 0; i < 7; i++) {
+    pinMode(pinesDisp[i], OUTPUT);
+    digitalWrite(pinesDisp[i], LOW);
+  }
+  for (int i = 0; i < 3; i++) {
+    pinMode(pinesTranst[i], OUTPUT);
+  }
+
+  // Configuración LEDs
+  ledcSetup(3, FREQ, RESOLUTION);
+  ledcSetup(1, FREQ, RESOLUTION);
+  ledcSetup(2, FREQ, RESOLUTION);
+  ledcAttachPin(LED_ROJO, 3);
+  ledcAttachPin(LED_AMARILLO, 1);
+  ledcAttachPin(LED_VERDE, 2);
+
+  // Configuración Servo
+  ledcSetup(SERVO_CH, SERVO_FREQ, SERVO_RES);
+  ledcAttachPin(SERVO_PIN, SERVO_CH);
+  moverServo(0);
+
+  // Botón
+  pinMode(BTN_PIN, INPUT_PULLUP);
+
+  // Timer
+  initTMR0();
+
+  // Conexión Adafruit IO
+  io.connect();
+  while(io.status() < AIO_CONNECTED) {
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.println("Conectado a Adafruit IO!");
+}
+
+// ----------------------
+// LOOP
+// ----------------------
+void loop() {
+  io.run();  // mantener conexión activa
+
+  // Presionar botón → medir temperatura
+  if (digitalRead(BTN_PIN) == LOW) {
+    if (digitalRead(BTN_PIN) == LOW) {
+      int valorADC = analogRead(LM35_PIN);
+      float voltaje = (valorADC * 3.3) / 4095.0;
+      temperatura = voltaje / 0.01;
+
+      Serial.print("Temperatura medida: ");
+      Serial.println(temperatura);
+
+      // Semáforo y servo
+      if (temperatura < 17.0) {
+        ledcWrite(3, 0);
+        ledcWrite(1, 0);
+        ledcWrite(2, 255);
+        moverServo(140);
+      } else if (temperatura >= 18.0 && temperatura < 20.0) {
+        ledcWrite(3, 0);
+        ledcWrite(1, 255);
+        ledcWrite(2, 0);
+        moverServo(90);
+      } else if (temperatura >= 20.0) {
+        ledcWrite(3, 255);
+        ledcWrite(1, 0);
+        ledcWrite(2, 0);
+        moverServo(45);
+      }
+
+      // Subir a Adafruit IO
+      temperatura_feed->save(temperatura);
+
+      // Esperar que suelte el botón
+      while (digitalRead(BTN_PIN) == LOW);
+    }
+  }
+
+  // Mostrar en display
+  int decenas = temperatura / 10;
+  int sin_dec = int(temperatura);
+  int unidades = temperatura - (decenas*10);
+  int value_dec = (temperatura - sin_dec) * 10;
+
+  if (DispSelec == 1) {
+    for (int i = 0; i < 7; i++) {
+      digitalWrite(pinesDisp[i], numeros[decenas][i]);
+    }
+    digitalWrite(pinesTranst[0], HIGH);
+  }
+  if (DispSelec == 2) {
+    for (int i = 0; i < 7; i++) {
+      digitalWrite(pinesDisp[i], numeros[unidades][i]);
+    }
+    digitalWrite(pinesTranst[1], HIGH);
+  } else if (DispSelec == 3) {
+    for (int i = 0; i < 7; i++) {
+      digitalWrite(pinesDisp[i], numeros[value_dec][i]);
+    }
+    digitalWrite(pinesDisp[7], LOW);
+    digitalWrite(pinesTranst[2], HIGH);
+  }
+}
