@@ -1,0 +1,242 @@
+#include <Arduino.h>
+#include <stdint.h>
+#include <driver/ledc.h>
+#include <WiFi.h>
+
+// Pines para LEDs separados
+#define LED_ROJO     19
+#define LED_AMARILLO 17
+#define LED_VERDE    18
+
+// Pin del LM35
+#define LM35_PIN 34   // Entrada analógica (ADC)
+
+// Botón para tomar lectura
+#define BTN_PIN 14
+
+// Configuración PWM para LEDs
+#define FREQ 5000
+#define RESOLUTION 8 // 0-255 duty
+
+// Configuración PWM para servo
+#define SERVO_PIN 15
+#define SERVO_CH  4        // Canal exclusivo para el servo
+#define SERVO_FREQ 50      // 50Hz para servomotor
+#define SERVO_RES 16       // Resolución alta (0-65535)
+
+// Variables
+float temperatura = 0;
+
+const char* ssid = "Nosoyese";      // SSID
+const char* pass = "soyese123";   // Contraseña
+                // a   b   c   d    e   f  g  dot
+int pinesDisp[] = {13, 12, 27, 26, 25, 33, 32, 2}; // 13, 12, 27, 26, 25, 33, 32, 2
+int pinesTranst[] = {22, 21, 23};  // 22, 21, 23
+// Tabla de números 0-9 para ánodo común
+
+byte numeros[10][8] = {
+
+{0,0,0,0,0,0,1,1}, // 0
+
+{1,0,0,1,1,1,1,1}, // 1
+
+{0,0,1,0,0,1,0,1}, // 2
+
+{0,0,0,0,1,1,0,1}, // 3
+
+{1,0,0,1,1,0,0,1}, // 4
+
+{0,1,0,0,1,0,0,1}, // 5
+
+{0,1,0,0,0,0,0,1}, // 6
+
+{0,0,0,1,1,1,1,1}, // 7
+
+{0,0,0,0,0,0,0,1}, // 8
+
+{0,0,0,0,1,0,0,1}  // 9
+};
+
+volatile int DispSelec = 1; // Seleccionar display
+
+void initTMR0(void);
+void IRAM_ATTR TMR0_ISR(void);
+hw_timer_t *Timer0_Cfg = NULL;
+
+// ISR del Timer0
+void IRAM_ATTR TMR0_ISR() {
+  DispSelec += 1;
+
+  if(DispSelec > 3){
+    DispSelec = 1;
+  }
+    digitalWrite(pinesTranst[1],LOW);
+    digitalWrite(pinesTranst[2],LOW);
+    digitalWrite(pinesTranst[0],LOW);
+    delayMicroseconds(100);
+}
+
+// Inicialización del Timer0
+void initTMR0(void) {
+  Timer0_Cfg = timerBegin(0, 80, true); 
+  timerAttachInterrupt(Timer0_Cfg, &TMR0_ISR, true); 
+  timerAlarmWrite(Timer0_Cfg, 2000 , true); // Disparar cada  500ms
+  timerAlarmEnable(Timer0_Cfg); // Habilitar la alarma del timer
+}
+
+// Función para mover el servo (0° a 180°)
+void moverServo(int angulo) {
+  int minDuty = 1638;   // ~5% duty (1 ms)
+  int maxDuty = 8192;   // ~10% duty (2 ms)
+  int duty = map(angulo, 0, 180, minDuty, maxDuty);
+  ledcWrite(SERVO_CH, duty);
+}
+
+void setup() {
+
+  for(int i=0; i<7; i++){
+      digitalWrite(pinesDisp[i],LOW);
+  }
+  Serial.begin(9600);
+  //WiFi.begin(ssid, pass);
+
+  initTMR0();
+
+  //while(WiFi.status() != WL_CONNECTED){
+  //  delay(1000);
+  //  Serial.println("Conectado WiFi...");
+  //}
+
+  //Serial.println("WiFi conectado exitosamente");
+
+  //Serial.println("Direccion IP asignada: ");
+  //Serial.println(WiFi.localIP());
+
+  // Configuración de PWM para LEDs
+  ledcSetup(3, FREQ, RESOLUTION); // Canal 3 → Rojo
+  ledcSetup(1, FREQ, RESOLUTION); // Canal 1 → Amarillo
+  ledcSetup(2, FREQ, RESOLUTION); // Canal 2 → Verde
+
+  ledcAttachPin(LED_ROJO, 3);
+  ledcAttachPin(LED_AMARILLO, 1);
+  ledcAttachPin(LED_VERDE, 2);
+
+  pinMode(BTN_PIN, INPUT_PULLUP);
+
+  for (int i=0; i<7; i++){
+    pinMode(pinesDisp[i], OUTPUT);
+  }
+
+  for (int i=0; i<2; i++){
+    pinMode(pinesTranst[i], OUTPUT);
+  }
+
+  // Configuración de PWM para servo
+  ledcSetup(SERVO_CH, SERVO_FREQ, SERVO_RES);
+  ledcAttachPin(SERVO_PIN, SERVO_CH);
+
+  // Inicializar servo en 0°
+  moverServo(0);
+
+  // Apagar LEDs al inicio
+  ledcWrite(3, 0);
+  ledcWrite(1, 0);
+  ledcWrite(2, 0);
+}
+
+void loop() {
+
+  // Esperar a que se presione el botón
+  if (digitalRead(BTN_PIN) == LOW) {
+    //delay(5); // Anti-rebote
+    if (digitalRead(BTN_PIN) == LOW) {
+      // Leer temperatura
+      int valorADC = analogRead(LM35_PIN);
+      float voltaje = (valorADC * 3.3) / 4095.0;
+      temperatura = voltaje / 0.01; // LM35: 10mV = 0.01V = 1°C
+
+      Serial.print("Temperatura medida: ");
+      Serial.print(temperatura);
+      Serial.println(" °C");
+
+      // Actualizar semáforo y servo
+      if (temperatura < 17.0) {
+        // Verde
+        ledcWrite(3, 0);   // Rojo apagado
+        ledcWrite(1, 0);   // Amarillo apagado
+        ledcWrite(2, 255); // Verde encendido
+        moverServo(140);
+      }
+      else if (temperatura >= 18.0 && temperatura < 20.0) {
+        // Amarillo
+        ledcWrite(3, 0);
+        ledcWrite(1, 255);
+        ledcWrite(2, 0);
+        moverServo(90);
+      }
+      else if (temperatura >= 20.0) {
+        // Rojo
+        ledcWrite(3, 255);
+        ledcWrite(1, 0);
+        ledcWrite(2, 0);
+        moverServo(45);
+      }
+
+      // Esperar a que se suelte el botón antes de permitir otra lectura
+      while (digitalRead(BTN_PIN) == LOW);
+    }
+  }
+
+  int decenas = temperatura / 10;
+
+  int sin_dec = int(temperatura);
+  int unidades = temperatura - (decenas*10);
+  int value_dec = (temperatura - sin_dec)*10;
+
+  if(DispSelec == 1){
+    //apagar los led que queremos mostrar
+    //encender el transistor del display menos significativo
+    digitalWrite(pinesTranst[1],LOW);
+    digitalWrite(pinesTranst[2],LOW);
+    digitalWrite(pinesTranst[0],LOW);
+
+    for(int i=0; i<7; i++){
+      digitalWrite(pinesDisp[i],numeros[decenas][i]);
+    }
+    digitalWrite(pinesTranst[0],HIGH);
+    digitalWrite(pinesTranst[1],LOW);
+    digitalWrite(pinesTranst[2],LOW);
+  }
+  if(DispSelec == 2){
+    //apagar los led que queremos mostrar
+    //encender el transistor del display del medio
+    digitalWrite(pinesTranst[1],LOW);
+    digitalWrite(pinesTranst[2],LOW);
+    digitalWrite(pinesTranst[0],LOW);
+
+    for(int i=0; i<7; i++){
+      digitalWrite(pinesDisp[i],numeros[unidades][i]);
+    }
+
+    digitalWrite(pinesTranst[1],HIGH);
+    digitalWrite(pinesTranst[2],LOW);
+    digitalWrite(pinesTranst[0],LOW);
+  }
+  
+  else{
+  //apagar los led que queremos mostrar
+  //encender el transistor del display más significativo
+
+    digitalWrite(pinesTranst[1],LOW);
+    digitalWrite(pinesTranst[2],LOW);
+    digitalWrite(pinesTranst[0],LOW);
+
+  for(int i=0; i<7; i++){
+      digitalWrite(pinesDisp[i],numeros[value_dec][i]);
+    }
+    digitalWrite(pinesDisp[7],LOW);
+    digitalWrite(pinesTranst[2],HIGH);
+    digitalWrite(pinesTranst[0],LOW);
+    digitalWrite(pinesTranst[1],LOW);
+  }
+}
