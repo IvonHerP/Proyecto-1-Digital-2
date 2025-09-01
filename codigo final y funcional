@@ -1,0 +1,231 @@
+
+#include <Arduino.h>
+#include <stdint.h>
+#include <driver/ledc.h>
+#include <WiFi.h>
+#include "AdafruitIO_WiFi.h"
+#include "time.h"
+
+// ----------------------
+// Credenciales de Adafruit IO
+// ----------------------
+#define IO_USERNAME  "Ivown_h"
+#define IO_KEY       "aio_Dqhn87vi1OqmLLWE57ghNJZsA40F"
+
+// WiFi
+#define WIFI_SSID    "Nosoyese"
+#define WIFI_PASS    "soyese123"
+
+// Cliente Adafruit IO
+AdafruitIO_WiFi io(IO_USERNAME, IO_KEY, WIFI_SSID, WIFI_PASS);
+
+// Feeds en Adafruit IO
+AdafruitIO_Feed *temperatura_feed = io.feed("temperatura");
+AdafruitIO_Feed *hora_feed        = io.feed("hora");
+
+// ----------------------
+// Pines y Configuración
+// ----------------------
+#define LED_ROJO     19
+#define LED_AMARILLO 17
+#define LED_VERDE    18
+#define LM35_PIN     34
+#define BTN_PIN      14
+#define SERVO_PIN    15
+#define SERVO_CH     4
+#define SERVO_FREQ   50
+#define SERVO_RES    16
+
+#define FREQ         5000
+#define RESOLUTION   8
+
+// Display
+int pinesDisp[]   = {13, 12, 27, 26, 25, 33, 32, 2};
+int pinesTranst[] = {22, 21, 23};
+
+byte numeros[10][8] = {
+  {0,0,0,0,0,0,1,1}, // 0
+  {1,0,0,1,1,1,1,1}, // 1
+  {0,0,1,0,0,1,0,1}, // 2
+  {0,0,0,0,1,1,0,1}, // 3
+  {1,0,0,1,1,0,0,1}, // 4
+  {0,1,0,0,1,0,0,1}, // 5
+  {0,1,0,0,0,0,0,1}, // 6
+  {0,0,0,1,1,1,1,1}, // 7
+  {0,0,0,0,0,0,0,1}, // 8
+  {0,0,0,0,1,0,0,1}  // 9
+};
+
+volatile int DispSelec = 0; // Se inicia en 0 para el primer dígito
+volatile int digitos[3];   // Variable para guardar los 3 dígitos
+hw_timer_t *Timer0_Cfg = NULL;
+
+float temperatura = 0;
+
+// ----------------------
+// Configuración NTP (UTC-6, Guatemala)
+// ----------------------
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = -6 * 3600;
+const int  daylightOffset_sec = 0;
+
+// ----------------------
+// Timer para multiplexado
+// ----------------------
+void IRAM_ATTR TMR0_ISR() {
+  // Apagar todos los displays para evitar "fantasmas"
+  digitalWrite(pinesTranst[0], LOW);
+  digitalWrite(pinesTranst[1], LOW);
+  digitalWrite(pinesTranst[2], LOW);
+
+  // Avanzar al siguiente display
+  DispSelec++;
+  if (DispSelec >= 3) {
+    DispSelec = 0;
+  }
+
+  // Escribir el dígito en los pines de segmentos
+  for (int i = 0; i < 7; i++) {
+    digitalWrite(pinesDisp[i], numeros[digitos[DispSelec]][i]);
+  }
+
+  // Encender el punto decimal para el segundo dígito (unidades)
+  if (DispSelec == 1) {
+    digitalWrite(pinesDisp[7], LOW);
+  } else {
+    digitalWrite(pinesDisp[7], HIGH);
+  }
+
+  // Encender el transistor del display actual
+  digitalWrite(pinesTranst[DispSelec], HIGH);
+}
+
+void initTMR0(void) {
+  // Se ajusta la velocidad a 2ms (2000 microsegundos) para mejor visualización
+  Timer0_Cfg = timerBegin(0, 80, true);
+  timerAttachInterrupt(Timer0_Cfg, &TMR0_ISR, true);
+  timerAlarmWrite(Timer0_Cfg, 2000, true);
+  timerAlarmEnable(Timer0_Cfg);
+}
+
+// ----------------------
+// Servo
+// ----------------------
+void moverServo(int angulo) {
+  int minDuty = 1638;
+  int maxDuty = 8192;
+  int duty = map(angulo, 0, 180, minDuty, maxDuty);
+  ledcWrite(SERVO_CH, duty);
+}
+
+// ----------------------
+// Obtener hora actual
+// ----------------------
+String getHoraActual() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return "00:00:00";
+  char buffer[10];
+  strftime(buffer, sizeof(buffer), "%H:%M:%S", &timeinfo);
+  return String(buffer);
+}
+
+// ----------------------
+// Setup
+// ----------------------
+void setup() {
+  Serial.begin(9600);
+
+  // Configuración Display
+  for (int i = 0; i < 8; i++) {
+    pinMode(pinesDisp[i], OUTPUT);
+    digitalWrite(pinesDisp[i], HIGH); // Dejamos los segmentos apagados por defecto
+  }
+  for (int i = 0; i < 3; i++) {
+    pinMode(pinesTranst[i], OUTPUT);
+    digitalWrite(pinesTranst[i], LOW); // Los transistores se inician apagados
+  }
+
+  // Configuración LEDs
+  ledcSetup(3, FREQ, RESOLUTION);
+  ledcSetup(1, FREQ, RESOLUTION);
+  ledcSetup(2, FREQ, RESOLUTION);
+  ledcAttachPin(LED_ROJO, 3);
+  ledcAttachPin(LED_AMARILLO, 1);
+  ledcAttachPin(LED_VERDE, 2);
+
+  // Configuración Servo
+  ledcSetup(SERVO_CH, SERVO_FREQ, SERVO_RES);
+  ledcAttachPin(SERVO_PIN, SERVO_CH);
+  moverServo(0);
+
+  // Botón
+  pinMode(BTN_PIN, INPUT_PULLUP);
+
+  // Timer
+  initTMR0();
+
+  // Conexión Adafruit IO
+  io.connect();
+  while(io.status() < AIO_CONNECTED) {
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.println("\nConectado a Adafruit IO!");
+
+  // Configuración NTP
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  Serial.println("Sincronizando hora...");
+  delay(2000);
+}
+
+// ----------------------
+// Loop
+// ----------------------
+void loop() {
+  io.run(); // mantener conexión
+
+  // Leer temperatura LM35
+  int valorADC = analogRead(LM35_PIN);
+  float voltaje = (valorADC * 3.3) / 4095.0;
+  temperatura = voltaje / 0.01;
+
+  // Actualizar los 3 dígitos de la temperatura
+  digitos[0] = (int)temperatura / 10;          // Decenas
+  digitos[1] = (int)temperatura % 10;          // Unidades
+  digitos[2] = (int)((temperatura - (int)temperatura) * 10); // Decimales
+
+  // Obtener hora
+  String horaActual = getHoraActual();
+
+  // Mostrar en Serial
+  Serial.print("[");
+  Serial.print(horaActual);
+  Serial.print("] Temperatura: ");
+  Serial.print(temperatura);
+  Serial.println(" °C");
+
+  // Actualizar LEDs y servo según temperatura
+  if (temperatura < 17.0) {
+    ledcWrite(3, 0);  // Rojo
+    ledcWrite(1, 0);  // Amarillo
+    ledcWrite(2, 255); // Verde
+    moverServo(140);
+  } else if (temperatura >= 18.0 && temperatura < 20.0) {
+    ledcWrite(3, 0);
+    ledcWrite(1, 255);
+    ledcWrite(2, 0);
+    moverServo(90);
+  } else if (temperatura >= 20.0) {
+    ledcWrite(3, 255);
+    ledcWrite(1, 0);
+    ledcWrite(2, 0);
+    moverServo(45);
+  }
+
+  // Subir datos a Adafruit IO
+  temperatura_feed->save(temperatura);
+  hora_feed->save(horaActual);
+
+  // El delay solo se usa para controlar la frecuencia de envío a Adafruit IO
+  delay(5000);
+}
